@@ -104,7 +104,7 @@ def summarize_outputs(output_dir: Path) -> Tuple[int, int]:
 def main():
     st.set_page_config(
         page_title="Oracle Fusion Template Generator",
-        page_icon="🧾",
+        page_icon=":ledger:",
         layout="wide",
     )
     st.title("Oracle Fusion Bulk Template Generator")
