@@ -3,3 +3,5 @@ __pycache__/
 .streamlit/
 *.pyc
 ORACLE_FUSION_OUTPUT/
+state/
+run_state.json
