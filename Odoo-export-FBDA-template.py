@@ -22,8 +22,10 @@ warnings.filterwarnings('ignore')
 
 class OracleFusionIntegration:
     
-    def __init__(self, base_output_dir: str = "ORACLE_FUSION_OUTPUT"):
+    def __init__(self, base_output_dir: str = "ORACLE_FUSION_OUTPUT", transaction_prefix: str = "BULK-ALAJH", starting_sequence: int = 1):
         self.base_output_dir = base_output_dir
+        self.transaction_prefix = transaction_prefix
+        self.starting_sequence = starting_sequence
         Path(self.base_output_dir).mkdir(parents=True, exist_ok=True)
         
         # =====================================================================
@@ -48,20 +50,25 @@ class OracleFusionIntegration:
         }
         
         # Payment methods that get receipts
-        self.receipt_payment_methods = {'Cash', 'Mada', 'Visa', 'MasterCard'}
+        self.receipt_payment_methods = {'Cash', 'Card', 'Mada', 'Visa', 'MasterCard', 'Amex'}
         
         self.payment_method_bank_mapping = {
             'Cash': ('Cash', 'Cash Account'),
+            'Card': ('Card', 'Card Account'),
             'Mada': ('Mada', 'Mada Account'),
             'Visa': ('Visa', 'Visa Account'),
             'MasterCard': ('MasterCard', 'MC Account'),
+            'Amex': ('Amex', 'Amex Account'),
         }
         
         self.payment_method_normalization = {
             'CASH': 'Cash',
+            'CARD': 'Card',
             'MADA': 'Mada',
             'VISA': 'Visa',
             'MASTERCARD': 'MasterCard',
+            'AMEX': 'Amex',
+            'AMERICAN EXPRESS': 'Amex',
             'TAMARA': 'TAMARA',
             'TABBY': 'TABBY',
         }
@@ -83,6 +90,9 @@ class OracleFusionIntegration:
         self.invoice_store_map = {}
         self.invoice_register_map = {}
         self.invoice_customer_type = {}
+        self.transaction_number_map = {}
+        self.last_transaction_number = starting_sequence - 1
+        self.generation_stats = {}
         
         self.line_items = None
         self.payments = None
@@ -707,18 +717,36 @@ class OracleFusionIntegration:
     # AR INVOICE GENERATION
     # ========================================================================
     
-    def get_ar_transaction_number(self, customer_type: str, register_name: str) -> str:
-        """Generate AR transaction number: BLK-XXXX-0000001"""
-        register_code = register_name[:4].upper()
-        if len(register_code) < 4:
-            register_code = register_code.ljust(4, 'X')
+    def format_transaction_number(self, sequence: int) -> str:
+        """Format a transaction number using the configured prefix."""
+        return f"{self.transaction_prefix}-{sequence:04d}"
+    
+    def build_transaction_number_map(self) -> Dict[str, int]:
+        """
+        Build a deterministic map of transaction numbers for NORMAL, TABBY, TAMARA
+        starting from self.starting_sequence. Numbers only advance when a type exists.
+        """
+        customer_types_present = set(self.invoice_customer_type.values())
+        has_normal = any(ct not in ['TAMARA', 'TABBY'] for ct in customer_types_present)
+        has_tabby = 'TABBY' in customer_types_present
+        has_tamara = 'TAMARA' in customer_types_present
         
-        if customer_type in ['TAMARA', 'TABBY']:
-            current_seq = self.ar_transaction_counter
-            self.ar_transaction_counter += 1
-            return f"BLK-{register_code}-{current_seq:07d}"
-        else:
-            return f"BLK-{register_code}-0000001"
+        sequence = self.starting_sequence
+        mapping = {}
+        
+        if has_normal:
+            mapping['NORMAL'] = sequence
+            sequence += 1
+        if has_tabby:
+            mapping['TABBY'] = sequence
+            sequence += 1
+        if has_tamara:
+            mapping['TAMARA'] = sequence
+            sequence += 1
+        
+        self.last_transaction_number = sequence - 1 if mapping else self.starting_sequence - 1
+        self.transaction_number_map = mapping
+        return mapping
     
     def generate_ar_invoice(self) -> pd.DataFrame:
         """Generate AR invoice records with EXACT column headers."""
@@ -732,10 +760,11 @@ class OracleFusionIntegration:
         invoice_count = 0
         tabby_tamara_count = 0
         normal_count = 0
+        total_sales_amount = 0.0
         
-        self.ar_transaction_counter = 1
         self.ar_segment_counter = 1
         self.invoice_to_ar_transaction = {}
+        self.build_transaction_number_map()
         
         unique_invoices = self.line_items['Order Ref'].unique()
         
@@ -765,7 +794,10 @@ class OracleFusionIntegration:
             else:
                 normal_count += 1
             
-            transaction_number = self.get_ar_transaction_number(customer_type, register_name)
+            customer_key = 'TABBY' if customer_type == 'TABBY' else 'TAMARA' if customer_type == 'TAMARA' else 'NORMAL'
+            transaction_number = self.format_transaction_number(
+                self.transaction_number_map.get(customer_key, self.starting_sequence)
+            )
             self.invoice_to_ar_transaction[invoice_number] = transaction_number
             
             print(f"\nInvoice: {invoice_number}")
@@ -843,15 +875,31 @@ class OracleFusionIntegration:
                 all_records.append(record)
             
             print(f"  Invoice Total: {invoice_total:.2f} SAR")
+            total_sales_amount += invoice_total
         
         print(f"\n{'='*80}")
         print("GENERATION COMPLETE")
         print(f"  Total Invoices: {invoice_count}")
-        print(f"  NORMAL (Cash/Mada/Visa): {normal_count} (Transaction: BLK-XXXX-0000001)")
-        print(f"  TAMARA/TABBY: {tabby_tamara_count} (Transaction numbers increment)")
+        if 'NORMAL' in self.transaction_number_map:
+            print(f"  NORMAL (Cash/Card/Visa/Mada/Amex/MC): {normal_count} (Transaction: {self.format_transaction_number(self.transaction_number_map['NORMAL'])})")
+        if 'TABBY' in self.transaction_number_map:
+            print(f"  TABBY: {tabby_tamara_count} (Transaction: {self.format_transaction_number(self.transaction_number_map['TABBY'])})")
+        if 'TAMARA' in self.transaction_number_map:
+            print(f"  TAMARA: {tabby_tamara_count} (Transaction: {self.format_transaction_number(self.transaction_number_map['TAMARA'])})")
         print(f"  Total Line Items: {len(all_records):,}")
         print(f"  Regular items: {regular_count}, Discount items: {discount_count}")
         print(f"  Total Columns: {len(self.ar_columns)}")
+        print(f"  Transaction number map: {self.transaction_number_map}")
+        print(f"  Last transaction number used: {self.last_transaction_number}")
+        
+        self.generation_stats = {
+            'invoice_count': invoice_count,
+            'line_item_count': len(all_records),
+            'total_sales_amount': round(total_sales_amount, 2),
+            'transaction_number_map': self.transaction_number_map,
+            'last_transaction_number': self.last_transaction_number,
+            'transaction_prefix': self.transaction_prefix
+        }
         
         return pd.DataFrame(all_records)
     
@@ -1124,7 +1172,14 @@ class OracleFusionIntegration:
         print(f"  - AR_Invoices/AR_Invoice_Import_*.csv")
         print(f"  - Receipts/Receipt_Import_*.csv")
         print(f"\nAR Invoice has {len(self.ar_columns)} columns (exact match to template)")
+        print(f"Last transaction number used: {self.last_transaction_number}")
         print("="*80)
+        
+        return {
+            'ar_df': ar_df,
+            'receipt_files': receipt_files,
+            'ar_stats': self.generation_stats
+        }
 
 
 # ========================================================================
