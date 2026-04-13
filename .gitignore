@@ -1,0 +1,5 @@
+__pycache__/
+.DS_Store
+.streamlit/
+*.pyc
+ORACLE_FUSION_OUTPUT/
